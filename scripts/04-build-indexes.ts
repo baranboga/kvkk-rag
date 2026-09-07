@@ -67,6 +67,30 @@ async function main() {
     await sql.unsafe(`ANALYZE kvkk.chunks`);
     await sql.unsafe(`ANALYZE kvkk.decisions`);
 
+    // --- Stop lexeme'ler (vurgulama gurultusunu kesmek icin) ---
+    //
+    // ts_stat tum tsvector'leri tarar; bu yuzden arama sirasinda degil burada,
+    // korpus basina bir kez hesaplaniyor. Esik: chunk'larin %`STOPLEX_DF_PCT`'inden
+    // fazlasinda gecen lexeme jenerik sayilir (bkz. drizzle/0002_stoplex.sql).
+    const STOPLEX_DF_PCT = 25;
+    console.log(`Stop lexeme'ler hesaplaniyor (DF > %${STOPLEX_DF_PCT})...`);
+    await sql.unsafe(`TRUNCATE kvkk.stoplex`);
+    await sql.unsafe(`
+      INSERT INTO kvkk.stoplex (lexeme, ndoc)
+      SELECT word, ndoc
+      FROM ts_stat('SELECT tsv FROM kvkk.chunks')
+      WHERE ndoc > (SELECT count(*) FROM kvkk.chunks) * ${STOPLEX_DF_PCT} / 100.0
+      ON CONFLICT (lexeme) DO UPDATE SET ndoc = excluded.ndoc
+    `);
+    const [stop] = await sql<{ n: string; top: string }[]>`
+      SELECT count(*)::text AS n,
+             (SELECT string_agg(lexeme, ', ' ORDER BY ndoc DESC)
+              FROM (SELECT lexeme, ndoc FROM kvkk.stoplex ORDER BY ndoc DESC LIMIT 6) s
+             ) AS top
+      FROM kvkk.stoplex
+    `;
+    console.log(`   ${stop.n} lexeme elendi (en sik: ${stop.top})`);
+
     const indexes = await sql<{ indexname: string; size: string }[]>`
       SELECT indexname,
              pg_size_pretty(pg_relation_size(('kvkk.' || indexname)::regclass)) AS size

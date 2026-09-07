@@ -28,10 +28,15 @@ export type SearchHit = {
   score: number;
   /** Kac chunk eslesti — kararin sorguyla ne kadar genis ortustugu. */
   matchedChunks: number;
-  /** Skoru en yuksek chunk'in metni. */
+  /** Skoru en yuksek chunk'in metni, cumle basina hizalanmis. */
   snippet: string;
-  /** ts_headline ile <mark> isaretlenmis pasaj (yalnizca terim eslesmesi varsa). */
+  /** ts_headline ile <mark> isaretlenmis pasaj; hicbir terim gecmiyorsa null. */
   highlighted: string | null;
+  /** Kararin hukum paragrafi (govdeden turetilmis, bkz. src/extract.ts). */
+  ruling: string | null;
+  /** "İdari para cezası · 250.000 TL" gibi kisa yaptirim etiketi. */
+  sanctionLabel: string | null;
+  sanctionKind: string | null;
   /** Bu karar hangi kollardan geldi — UI'da "neden bulundu"yu gostermek icin. */
   via: ("vector" | "keyword")[];
 };
@@ -237,7 +242,24 @@ export async function hybridSearch(
   }
 
   // --- Metadata + vurgulu pasaj ---
+  //
+  // Vurgulama, ESLESME sorgusundan AYRI bir sorgu kullanir.
+  //
+  // Neden eslesme sorgusu kullanilamiyor: `websearch_to_tsquery` terimleri
+  // AND'liyor (eslesme tarafinda istedigimiz davranis, secici olsun). Ama ayni
+  // sorguyu gosterimde kullanmak, vektorle bulunan sonuclarda `tsv @@ q` false
+  // oldugu icin ts_headline'i tamamen devre disi birakiyordu; pasaj chunk'in
+  // ham basindan aliniyor ve overlap yuzunden cumlenin ortasindan basliyordu
+  // ("yandan, Kanun'un...").
+  //
+  // Neden ayrica jenerik terimler eleniyor: OR sorgusu "veri", "kisisel" gibi
+  // korpusun %90'inda gecen terimleri de isaretliyor ve pasaj okunmaz oluyor.
+  // Vurgulamanin isi "bu sonuc NEDEN ilgili" sorusunu gostermek; %92 sikligi
+  // olan bir kelime bunu anlatmiyor. Yuksek frekansli lexeme'ler bu yuzden
+  // SQL tarafinda eleniyor (kvkk.stoplex, bkz. drizzle/0002_stoplex.sql).
+  const relaxedTokens = queryTokens(query);
   const chunkIds = top.map(([, v]) => v.bestChunk);
+
   const details = await queryClient<
     {
       chunk_id: string;
@@ -251,8 +273,39 @@ export async function hybridSearch(
       url: string;
       snippet: string;
       highlighted: string | null;
+      ruling: string | null;
+      sanction_label: string | null;
+      sanction_kind: string | null;
     }[]
   >`
+    WITH
+    -- Sorgu token'lari + her birinin korpusta jenerik olup olmadigi.
+    toks AS (
+      SELECT t,
+             EXISTS (
+               SELECT 1 FROM kvkk.stoplex s
+               WHERE s.lexeme = ANY (
+                 tsvector_to_array(to_tsvector('kvkk.turkish_unaccent', t))
+               )
+             ) AS generic
+      FROM unnest(${relaxedTokens}::text[]) AS t
+    ),
+    -- Vurgulama sorgusu: once yalnizca AYIRT EDICI token'lar; sorgunun tamami
+    -- jenerik terimlerden olusuyorsa (or. "kişisel veri") hepsine geri dus,
+    -- token hic yoksa hicbir seyle eslesmeyen sentinel'e. Sentinel halinde
+    -- ts_headline metnin basini verir; cagiran taraf <mark> yoklugundan anlayip
+    -- cumleye hizalanmis snippet'e duser.
+    hq AS (
+      SELECT to_tsquery(
+               'kvkk.turkish_unaccent',
+               coalesce(
+                 nullif(string_agg(t, ' | ') FILTER (WHERE NOT generic), ''),
+                 nullif(string_agg(t, ' | '), ''),
+                 'zzznomatchzzz'
+               )
+             ) AS q
+      FROM toks
+    )
     SELECT
       c.id            AS chunk_id,
       d.id            AS decision_id,
@@ -263,16 +316,17 @@ export async function hybridSearch(
       d.title,
       d.konu_ozeti,
       d.url,
+      d.ruling,
+      d.sanction_label,
+      d.sanction_kind,
       c.text          AS snippet,
-      CASE WHEN c.tsv @@ q THEN
-        ts_headline(
-          'kvkk.turkish_unaccent', c.text, q,
-          'StartSel=<mark>, StopSel=</mark>, MaxFragments=2, FragmentDelimiter=" … ", MaxWords=40, MinWords=18'
-        )
-      END             AS highlighted
+      ts_headline(
+        'kvkk.turkish_unaccent', c.text, hq.q,
+        'StartSel=<mark>, StopSel=</mark>, MaxFragments=2, FragmentDelimiter=" … ", MaxWords=45, MinWords=20'
+      )               AS highlighted
     FROM kvkk.chunks c
-    JOIN kvkk.decisions d ON d.id = c.decision_id,
-         websearch_to_tsquery('kvkk.turkish_unaccent', ${query}) AS q
+    JOIN kvkk.decisions d ON d.id = c.decision_id
+    CROSS JOIN hq
     WHERE c.id = ANY(${chunkIds}::text[])
   `;
 
@@ -281,6 +335,10 @@ export async function hybridSearch(
   const hits: SearchHit[] = top.flatMap(([decisionId, agg]) => {
     const d = detailById.get(agg.bestChunk);
     if (!d) return [];
+    // <mark> yoksa sorgudan hicbir terim pasajda gecmiyor demektir; ts_headline
+    // bu durumda metnin basini donduruyor, yani ham chunk'tan farki kalmiyor.
+    // Boyle hallerde cumle basina hizalanmis snippet daha okunur.
+    const marked = d.highlighted?.includes("<mark>") ? d.highlighted : null;
     return [
       {
         decisionId,
@@ -293,8 +351,11 @@ export async function hybridSearch(
         url: d.url,
         score: agg.score,
         matchedChunks: agg.matched,
-        snippet: d.snippet,
-        highlighted: d.highlighted ?? null,
+        snippet: alignToSentence(d.snippet),
+        highlighted: marked,
+        ruling: d.ruling,
+        sanctionLabel: d.sanction_label,
+        sanctionKind: d.sanction_kind,
         via: [...agg.via],
       },
     ];
@@ -310,6 +371,40 @@ export async function hybridSearch(
       fused: byDecision.size,
     },
   };
+}
+
+/**
+ * Sorgu metnini gevsek vurgulama icin token'lara ayirir.
+ *
+ * Guvenlik: token'lar yalnizca harf/rakam iceriyor, yani tsquery operatoru
+ * (`&`, `|`, `!`, `<->`, parantez) enjekte edilemez. Token'lar SQL'e text[]
+ * parametresi olarak gidiyor, birlestirme Postgres tarafinda yapiliyor.
+ */
+function queryTokens(query: string): string[] {
+  return [...new Set(query.toLocaleLowerCase("tr").match(/[\p{L}\p{N}]+/gu) ?? [])]
+    .filter((t) => t.length >= 2)
+    .slice(0, 12);
+}
+
+/**
+ * Pasaji cumle basina hizalar.
+ *
+ * Chunk'lar 200 karakter overlap ile uretiliyor ve overlap kelime sinirindan
+ * kesildigi icin bir chunk cumlenin ortasindan baslayabiliyor ("yandan, Kanun'un
+ * ..."). Alintilanabilir olmasi icin bastaki yarim cumleyi at — ama geri kalan
+ * cok kisaliyorsa metni oldugu gibi birak.
+ */
+function alignToSentence(text: string): string {
+  const t = text.trim();
+  // Buyuk harf / madde isareti / rakam / tirnak ile basliyorsa zaten hizali.
+  if (/^[-–—“"'(\d]|^\p{Lu}/u.test(t)) return t;
+
+  const m = t.match(/[.!?]\s+(?=[-–—“"'(\d]|\p{Lu})/u);
+  if (m?.index !== undefined) {
+    const rest = t.slice(m.index + m[0].length).trim();
+    if (rest.length >= 200) return rest;
+  }
+  return t;
 }
 
 /**

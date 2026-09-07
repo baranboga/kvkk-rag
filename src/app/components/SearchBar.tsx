@@ -230,11 +230,41 @@ function ResultCard({ hit, rank }: { hit: SearchHit; rank: number }) {
         </a>
       </h2>
 
+      {hit.sanctionLabel && (
+        <p className="mt-2">
+          <span
+            className={`rounded px-2 py-0.5 text-[11px] font-medium ${
+              SANCTION_TONE[hit.sanctionKind ?? ""] ??
+              "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300"
+            }`}
+          >
+            {hit.sanctionLabel}
+          </span>
+        </p>
+      )}
+
       <p
         className="passage mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-400"
         // ts_headline yalnizca <mark> uretir; icerik kendi veritabanimizdan geliyor.
         dangerouslySetInnerHTML={{ __html: passage }}
       />
+
+      {hit.ruling && (
+        <details className="group mt-3 rounded-lg border border-slate-200 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-950/40">
+          <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-slate-700 marker:content-none hover:text-sky-700 dark:text-slate-300 dark:hover:text-sky-400">
+            <span className="inline-block transition-transform group-open:rotate-90">▸</span>{" "}
+            Kararın hükmü
+            {hit.sanctionLabel && (
+              <span className="ml-1 font-normal text-slate-500 dark:text-slate-500">
+                — {hit.sanctionLabel}
+              </span>
+            )}
+          </summary>
+          <p className="border-t border-slate-200 px-3 py-2.5 text-xs leading-relaxed text-slate-600 dark:border-slate-800 dark:text-slate-400">
+            {hit.ruling}
+          </p>
+        </details>
+      )}
 
       <a
         href={hit.url}
@@ -247,6 +277,15 @@ function ResultCard({ hit, rank }: { hit: SearchHit; rank: number }) {
     </li>
   );
 }
+
+/** Yaptirim turune gore renk: para cezasi vurgulu, olumsuz sonuclar notr. */
+const SANCTION_TONE: Record<string, string> = {
+  "idari-para-cezasi": "bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300",
+  talimat: "bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300",
+  ret: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+  "islem-yok": "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+  hatirlatma: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
+};
 
 function Badge({ tone, children }: { tone: "sky" | "emerald"; children: React.ReactNode }) {
   const tones = {

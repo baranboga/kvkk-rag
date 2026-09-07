@@ -2,43 +2,129 @@
  * Karar govdesinden HUKUM ve YAPTIRIM cikarimi.
  *
  * Tamamen deterministik (regex) — LLM cagrisi yok, dolayisiyla maliyeti yok.
- * KVKK karar ozetleri tutarli bir kalip izliyor: metin "... karar verilmiştir."
- * ile biten bir hukum paragrafiyla kapaniyor. Olcum: 310 kararin 298'inde bu
- * kalip var (bkz. README "Hüküm ve yaptırım çıkarımı").
+ *
+ * KVKK karar ozetleri tutarli bir kuyruk yapisi izliyor:
+ *
+ *     - [gerekce maddeleri, <ul> icinde, "- " onekli]
+ *     - ...
+ *     hususlari dikkate alindiginda, ... [OPERATIF HUKUM]
+ *     [bazen ek operatif paragraflar]
+ *     karar verilmiştir.
+ *
+ * Yani hukum tek bir paragraf DEGIL, govdenin sonundaki bir BLOK. "karar
+ * verilmiştir." cogu zaman 18 karakterlik ayri bir paragraf olarak duruyor
+ * (olcum: 310 kararin 203'unde boyle), bu yuzden yalnizca o paragrafi almak
+ * hicbir bilgi vermiyor.
  */
 
-/** Hukum paragrafini tanimlayan kalip. */
-const RULING = /karar veril(?:miş|mesi)/i;
+/** Hukum blogunu KAPATAN ifade. */
+const RULING_END = /karar veril(?:miş|mesi)/i;
 
 /**
- * Kararin hukum paragrafi: govdenin sonundan basa dogru "karar veril..."
- * iceren ILK paragraf.
+ * Hukum blogunu ACAN ifadeler. KVKK kararlari operatif kismi neredeyse her
+ * zaman bu kaliplardan biriyle baslatiyor (olcum: "dikkate alındığında"
+ * 199/310, "incelenmesi neticesinde" 110/310).
+ */
+const RULING_START =
+  /dikkate\s+alındığında|değerlendiril(?:mesi|diğinde)\s+netice|incelen(?:mesi|diğinde)\s+netice|inceleme\s+neticesinde/i;
+
+/** Anchor aranirken sonda kac paragraf geriye gidilecegi. */
+const ANCHOR_LOOKBACK = 6;
+/** Anchor bulunamazsa blogun hedeflenen minimum uzunlugu. */
+const FALLBACK_MIN_CHARS = 400;
+const FALLBACK_MAX_PARAS = 4;
+
+/**
+ * Kararin operatif hukum blogu.
  *
- * Neden sondan: uzun kararlarda gerekce kismi da onceki Kurul kararlarina atif
- * yaparken ayni ifadeyi kullaniyor ("...2019/81 sayili karar verilmistir").
- * Asil hukum her zaman metnin sonunda.
+ * Bloğun SONU: "karar veril..." iceren son paragraf.
+ * Bloğun BASI: oradan geriye dogru en yakin RULING_START kalibi; bulunamazsa
+ * karakter butcesiyle geriye gidilir (kararlarin bir kismi "Aciklanan mevzuat
+ * hukumleri uyarinca..." gibi kalip disi bir acilis kullaniyor).
  */
 export function extractRuling(body: string): string | null {
-  const paragraphs = body.split(/\n{2,}/).map((p) => p.trim());
-  for (let i = paragraphs.length - 1; i >= 0; i--) {
-    const p = paragraphs[i];
-    if (!RULING.test(p)) continue;
-    // Madde isareti ("- ") ile baslayan satirlar tek basina hukum degil,
-    // hukum listesinin bir kalemi; yine de bilgi tasiyor, isareti kaldir.
-    const clean = p.replace(/^-\s*/, "").trim();
-    if (clean.length >= 40) return clean;
+  const paras = body
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (paras.length === 0) return null;
+
+  const end = paras.findLastIndex((p) => RULING_END.test(p));
+  if (end < 0) return null;
+
+  let start = -1;
+  for (let i = end; i >= 0 && end - i < ANCHOR_LOOKBACK; i--) {
+    if (RULING_START.test(paras[i])) {
+      start = i;
+      break;
+    }
   }
-  return null;
+
+  if (start < 0) {
+    start = end;
+    let total = paras[end].length;
+    while (start > 0 && total < FALLBACK_MIN_CHARS && end - start < FALLBACK_MAX_PARAS - 1) {
+      start--;
+      total += paras[start].length;
+    }
+  }
+
+  const text = paras
+    .slice(start, end + 1)
+    .map((p) => p.replace(/^-\s*/, ""))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return text.length >= 40 ? text : null;
 }
+
+export type SanctionKind =
+  | "idari-para-cezasi"
+  | "talimat"
+  | "ret"
+  | "islem-yok"
+  | "hatirlatma";
 
 export type Sanction = {
   /** UI'da badge olarak gosterilen kisa etiket. */
   label: string;
-  /** "idari-para-cezasi" | "talimat" | "islem-yok" | "diger" */
-  kind: string;
+  kind: SanctionKind;
   /** Idari para cezasi tutari (TL), yakalanabildiyse. */
   amountTry: number | null;
 };
+
+/**
+ * Yaptirim sinifi kalibi, EN AGIRDAN HAFIFE dogru siralanmis.
+ *
+ * Sira onemli: bir hukum blogu birden fazla yaptirim tasiyabiliyor (or. bir
+ * konuda para cezasi + baska bir konuda hatirlatma). Ilk eslesen kazanir.
+ */
+const SANCTION_RULES: { kind: SanctionKind; label: string; re: RegExp }[] = [
+  // idari-para-cezasi ayri ele aliniyor (tutar ayikilamasi gerekiyor).
+  {
+    kind: "talimat",
+    label: "Talimat verildi",
+    re: /talimatlandırılmasına|talimat verilmesine|yönünde talimat|uyarılmasına/i,
+  },
+  {
+    kind: "ret",
+    label: "Talep reddedildi",
+    re: /(şikâyet|şikayet|talebin|talebinin|başvurunun|itirazın)[^.]{0,40}reddine/i,
+  },
+  {
+    kind: "islem-yok",
+    label: "İşlem gerekmedi",
+    // "...yapılacak bir işlem bulunmadığına" ve "...olmadığına" varyantlarinin
+    // ikisi de kullaniliyor.
+    re: /yapılacak bir işlem (?:bulunmadığ|olmadığ)|işlem yapılmasına (?:gerek|yer) (?:bulunmadığ|olmadığ)/i,
+  },
+  {
+    kind: "hatirlatma",
+    label: "Hatırlatma yapıldı",
+    re: /hatırlatılmasına/i,
+  },
+];
 
 /**
  * Turkce binlik ayraci nokta: "3.250.000" -> 3250000.
@@ -46,23 +132,33 @@ export type Sanction = {
  */
 function parseTryAmount(raw: string): number | null {
   const n = Number(raw.replace(/\./g, "").replace(/,\d+$/, ""));
-  // 1.000 TL alti / 100.000.000 TL ustu degerler kalip hatasi (madde no, tarih vb.)
+  // 1.000 TL alti / 100.000.000 TL ustu degerler kalip hatasi (madde no, yil vb.)
   return Number.isFinite(n) && n >= 1000 && n <= 100_000_000 ? n : null;
 }
 
 /**
- * Yaptirim etiketi. Sirala onemli: idari para cezasi en belirleyici sonuc,
- * onu talimat, sonra "islem yapilmasina gerek yok" izliyor.
+ * Yaptirim etiketi — SADECE hukum blogundan cikarilir, govdenin tamamindan degil.
+ *
+ * Neden onemli: "idari para cezası", "şikâyetin reddine" gibi ifadeler kararin
+ * anlati kisminda da geciyor (taraflarin iddialari, onceki Kurul kararlarina
+ * atiflar, mevzuat alintilari). Govdenin tamamina bakmak yanlis etiket
+ * uretiyordu.
+ *
+ * Tek etiket donuyor; bir kararda birden fazla yaptirim varsa en agir olan
+ * kazanir (para cezasi > talimat > ret > islem yok).
  */
 export function extractSanction(body: string): Sanction | null {
-  if (/idari para cezası/i.test(body)) {
-    // Tutar genellikle "... 250.000 TL idari para cezası" ya da
-    // "idari para cezası ... 250.000 TL" siralamasinda geciyor; ikisini de dene.
-    const near =
-      body.match(/([\d][\d.]{3,})\s*(?:TL|Türk Lirası)[^.]{0,80}idari para cezası/i) ??
-      body.match(/idari para cezası[^.]{0,120}?([\d][\d.]{3,})\s*(?:TL|Türk Lirası)/i) ??
-      body.match(/([\d][\d.]{3,})\s*(?:TL|Türk Lirası)/i);
-    const amountTry = near ? parseTryAmount(near[1]) : null;
+  const ruling = extractRuling(body);
+  if (!ruling) return null;
+
+  if (/idari para cezası/i.test(ruling)) {
+    // Tutar "250.000 TL idari para cezası" ya da "idari para cezası ... 250.000 TL"
+    // siralamasinda gelebiliyor; ikisini de dene, sonra blok icinde herhangi bir tutar.
+    const m =
+      ruling.match(/([\d][\d.]{3,})\s*(?:TL|Türk Lirası)[^.]{0,80}idari para cezası/i) ??
+      ruling.match(/idari para cezası[^.]{0,140}?([\d][\d.]{3,})\s*(?:TL|Türk Lirası)/i) ??
+      ruling.match(/([\d][\d.]{3,})\s*(?:TL|Türk Lirası)/i);
+    const amountTry = m ? parseTryAmount(m[1]) : null;
     return {
       kind: "idari-para-cezasi",
       amountTry,
@@ -72,16 +168,10 @@ export function extractSanction(body: string): Sanction | null {
     };
   }
 
-  if (/talimatlandırılmasına|yönünde talimat/i.test(body)) {
-    return { kind: "talimat", amountTry: null, label: "Talimat verildi" };
-  }
-
-  if (/yapılacak bir işlem bulunmadığ|işlem yapılmasına gerek/i.test(body)) {
-    return { kind: "islem-yok", amountTry: null, label: "İşlem gerekmedi" };
-  }
-
-  if (/(şikâyet|şikayet|talebin|başvurunun)[^.]{0,40}reddine/i.test(body)) {
-    return { kind: "ret", amountTry: null, label: "Talep reddedildi" };
+  for (const rule of SANCTION_RULES) {
+    if (rule.re.test(ruling)) {
+      return { kind: rule.kind, amountTry: null, label: rule.label };
+    }
   }
 
   return null;
