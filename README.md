@@ -1,17 +1,26 @@
 # kvkk-rag
 
 KVKK (Kişisel Verileri Koruma Kurumu) **kurul karar özetleri** üzerinde semantik
-arama. Kararların tamamı indekslenir, sorgular hem anlam (vektör) hem terim
-(Türkçe full-text) tarafından aranır ve iki sonuç listesi RRF ile birleştirilir.
+arama ve analiz. Kararların tamamı indekslenir, sorgular hem anlam (vektör) hem
+terim (Türkçe full-text) tarafından aranır ve iki sonuç listesi RRF ile
+birleştirilir.
+
+İki mod var:
+
+| Mod | Ne yapar | Maliyet |
+| --- | --- | --- |
+| **Arama** | İlgili kurul kararlarını bulur, eşleşen pasajı vurgular, kararın hükmünü ve yaptırımını gösterir | **Ücretsiz** |
+| **Analiz** | Aynı retrieval + LLM'in yalnızca bulunan kararlara dayanarak ürettiği, karar numarasıyla belgelenmiş cevap | Soru başına ~$0,012 |
 
 - **Stack:** Next.js 15 (App Router), TypeScript, Node 20+, Tailwind v4
 - **Vektör deposu:** Supabase Postgres + **pgvector** (HNSW, cosine)
 - **Embedding:** Hugging Face Inference API — `intfloat/multilingual-e5-large`
   (1024d, açık kaynak, ücretsiz)
+- **Cevap üretimi:** OpenAI `gpt-4.1` (yalnızca Analiz modunda)
 - **Tüm key'ler server-side.** Hiçbir değişken `NEXT_PUBLIC_` almaz; tarayıcı ne
-  HF'e ne Postgres'e doğrudan bağlanır, yalnızca `/api/search`'e gider.
-- **Maliyet: sıfır.** Cevap üretimi (LLM çağrısı) yok, yalnızca retrieval —
-  arama başına 1 HF embedding çağrısı. Bkz. [Maliyet ve sınırlar](#maliyet-ve-sınırlar).
+  HF'e, ne OpenAI'a, ne Postgres'e doğrudan bağlanır — yalnızca `/api/search` ve
+  `/api/chat`'e gider. `OPENAI_API_KEY` yoksa arama çalışmaya devam eder,
+  yalnızca Analiz sekmesi devre dışı kalır.
 
 ---
 
@@ -31,6 +40,8 @@ scripts/
 src/
   config.ts                # model/boyut/chunk/arama parametreleri — tek kaynak
   chunk.ts                 # Türkçe cümle sınırına duyarlı chunking
+  extract.ts               # hüküm bloğu + yaptırım çıkarımı (regex, ücretsiz)
+  chat.ts                  # retrieval + OpenAI cevap üretimi (Analiz modu)
   corpus.ts                # UI için indeks durumu
   db/{schema,client,direct}.ts
   embeddings/hf.ts         # HF feature-extraction + E5 prefix'leri
@@ -38,8 +49,12 @@ src/
   search/hybrid.ts         # pgvector + full-text, RRF füzyonu
   app/
     page.tsx               # ana sayfa (server component)
-    components/SearchBar.tsx
+    components/
+      Workspace.tsx        # Arama / Analiz sekmeleri
+      SearchBar.tsx
+      Chat.tsx             # akışlı cevap + tıklanabilir atıflar
     api/search/route.ts
+    api/chat/route.ts      # NDJSON akışı: sources -> delta… -> done
 data/                      # scrape çıktısı (gitignore)
 ```
 
@@ -64,8 +79,13 @@ cp .env.example .env
 | `HF_TOKEN` | Hugging Face token ("Read" yetkisi yeterli) |
 | `HF_EMBEDDING_MODEL` | `intfloat/multilingual-e5-large` (default) |
 | `HF_EMBEDDING_DIM` | `1024` (e5-large) / `768` (e5-base) |
+| `OPENAI_API_KEY` | **Opsiyonel.** Yalnızca Analiz modu için; yoksa arama çalışır |
+| `OPENAI_CHAT_MODEL` | `gpt-4.1` (default) |
 | `DATABASE_URL` | Supabase **pooler** (port **6543**) — uygulama sorguları |
 | `DIRECT_URL` | Supabase **direct** (port **5432**) — migration / DDL |
+
+> **⚠️ `.env` yalnızca sunucu başlangıcında okunur.** `OPENAI_API_KEY` ekledikten
+> sonra `npm run dev`'i yeniden başlatmadan Analiz sekmesi görünmez.
 
 > **⚠️ Pooler uyarısı:** `6543` transaction pooler'dır, prepared statement
 > desteklemez. `src/db/client.ts` bağlantıyı `prepare: false` ile kurar. DDL
@@ -165,6 +185,34 @@ transaction pipeline'ı bunu ~0,9 s'ye indirdi.
 > `SET LOCAL hnsw.ef_search` atlanırsa LIMIT'e rağmen sessizce 40 aday gelir ve
 > füzyon zayıflar. `src/config.ts` bu yüzden ikisini birlikte tutuyor.
 
+**Neden vurgulama, eşleşme sorgusundan ayrı bir sorgu kullanıyor?** Eşleşmede
+`websearch_to_tsquery` terimleri AND'liyor — seçici olması istediğimiz davranış.
+Ama aynı sorguyu gösterimde kullanmak, vektörle bulunan sonuçlarda `tsv @@ q`
+false olduğu için `ts_headline`'ı tamamen devre dışı bırakıyordu: pasaj chunk'ın
+ham başından alınıyor ve overlap yüzünden cümlenin ortasından başlıyordu
+("yandan, Kanun'un…"). Vurgulama artık gevşek (OR) bir sorguyla yapılıyor.
+
+**Neden `kvkk.stoplex`?** Gevşek sorgu "veri", "kişisel" gibi terimleri de
+işaretliyordu — ölçüm (`ts_stat`, 3.757 chunk): `ver` %92,5, `kisisel` %86,6,
+`ilgil` %84,5. Korpusun %92'sinde geçen bir kelimeyi vurgulamak "bu sonuç neden
+ilgili" sorusuna cevap vermiyor, sadece pasajı okunmaz yapıyor. `npm run db:index`
+DF > %25 olan lexeme'leri (46 tane) bu tabloya yazıyor ve vurgulama sorgusundan
+eleniyor. Sorgunun tamamı jenerik terimden oluşuyorsa (ör. "kişisel veri")
+hepsine geri düşülüyor — hiç vurgu olmamasından iyi.
+
+**Neden hüküm ayrı bir blok olarak çıkarılıyor?** KVKK kararları tutarlı bir
+kuyruk yapısı izliyor: gerekçe maddeleri (`<ul>`) → "hususları dikkate
+alındığında…" operatif paragraf → `karar verilmiştir.` Bu son cümle çoğu zaman
+18 karakterlik ayrı bir paragraf (310 kararın 203'ünde), dolayısıyla yalnızca
+onu almak hiçbir bilgi vermiyor. `src/extract.ts` bloğun sonunu "karar veril…"
+ile, başını operatif açılış kalıbıyla bulur; kalıp yoksa karakter bütçesiyle
+geriye gider. Kapsam: **298/310**.
+
+**Neden yaptırım yalnızca hüküm bloğundan çıkarılıyor?** "idari para cezası",
+"şikâyetin reddine" gibi ifadeler kararın anlatı kısmında da geçiyor (tarafların
+iddiaları, mevzuat alıntıları, önceki kararlara atıflar). Gövdenin tamamına
+bakmak yanlış etiket üretiyordu.
+
 ---
 
 ## Model / boyut değiştirmek
@@ -192,7 +240,13 @@ npm run db:index
 | --- | --- | --- |
 | Embedding | HF Inference API | Ücretsiz katman — indeksleme 3.757 çağrı (tek seferlik), arama başına 1 çağrı |
 | Veritabanı | Supabase Postgres + pgvector | `kvkk` şeması **69 MB** (500 MB ücretsiz limitten) |
-| Cevap üretimi | — | Yok; sistem arama-odaklı, LLM çağrısı hiç yapılmıyor |
+| Hüküm / yaptırım özeti | — | Deterministik regex çıkarımı (`src/extract.ts`), API çağrısı yok |
+| Cevap üretimi (Analiz) | OpenAI `gpt-4.1` | Ölçülen: soru başına ~3.200 girdi + ~700 çıktı token ≈ **$0,012** |
+
+Analiz maliyeti yalnızca kullanıcı soru sorduğunda oluşur; arama ve karar
+listeleme hiçbir ücretli servise dokunmaz. UI her cevabın altında gerçek token
+kullanımını ve tahmini maliyeti gösterir (`Chat.tsx` içindeki fiyat sabitleri
+gpt-4.1 liste fiyatıdır: 1M girdi $2 / 1M çıktı $8).
 
 İki sınıra dikkat:
 

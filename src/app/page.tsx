@@ -1,4 +1,4 @@
-import SearchBar from "./components/SearchBar";
+import Workspace from "./components/Workspace";
 import { HF_EMBEDDING_DIM, HF_EMBEDDING_MODEL } from "@/config";
 import { getCorpusStats } from "@/corpus";
 
@@ -30,7 +30,12 @@ export default async function Home() {
 
       <section className="mt-8">
         {stats.ready ? (
-          <SearchBar yearMin={stats.yearMin} yearMax={stats.yearMax} ready />
+          <Workspace
+            yearMin={stats.yearMin}
+            yearMax={stats.yearMax}
+            // Key'in kendisi ASLA client'a gecmez; yalnizca var/yok bilgisi.
+            chatEnabled={Boolean(process.env.OPENAI_API_KEY)}
+          />
         ) : (
           <NotIndexed />
         )}
@@ -45,6 +50,9 @@ export default async function Home() {
           )}
           <Stat label="Embedding" value={`${HF_EMBEDDING_MODEL} · ${HF_EMBEDDING_DIM}d`} />
           <Stat label="Arama" value="pgvector HNSW + Türkçe full-text (RRF)" />
+          {process.env.OPENAI_API_KEY && (
+            <Stat label="Analiz" value={process.env.OPENAI_CHAT_MODEL ?? "gpt-4.1"} />
+          )}
         </dl>
         <p className="mt-4">
           Kaynak:{" "}

@@ -253,9 +253,9 @@ function ResultCard({ hit, rank }: { hit: SearchHit; rank: number }) {
         <details className="group mt-3 rounded-lg border border-slate-200 bg-slate-50/70 dark:border-slate-800 dark:bg-slate-950/40">
           <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-slate-700 marker:content-none hover:text-sky-700 dark:text-slate-300 dark:hover:text-sky-400">
             <span className="inline-block transition-transform group-open:rotate-90">▸</span>{" "}
-            Kararın hükmü
+            Kararın hükmü{" "}
             {hit.sanctionLabel && (
-              <span className="ml-1 font-normal text-slate-500 dark:text-slate-500">
+              <span className="font-normal text-slate-500 dark:text-slate-500">
                 — {hit.sanctionLabel}
               </span>
             )}
