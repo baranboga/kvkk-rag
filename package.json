@@ -1,0 +1,40 @@
+{
+  "name": "kvkk-rag",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "verify:db": "tsx scripts/00-verify-db.ts",
+    "db:migrate": "tsx scripts/01-migrate.ts",
+    "scrape": "tsx scripts/02-scrape.ts",
+    "embed": "tsx scripts/03-embed.ts",
+    "db:index": "tsx scripts/04-build-indexes.ts",
+    "search": "tsx scripts/05-search-cli.ts",
+    "db:reset": "tsx scripts/99-reset.ts"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.45.2",
+    "next": "^15.5.24",
+    "postgres": "^3.4.9",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^26.4.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "postcss": "^8.5.26",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3"
+  }
+}

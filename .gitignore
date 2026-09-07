@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+build/
+
+.env
+.env.local
+
+# Scrape cache: yeniden uretilebilir, repoya girmez
+data/decisions.json
+data/scrape-report.json
+
+next-env.d.ts
+tsconfig.tsbuildinfo
+*.log
