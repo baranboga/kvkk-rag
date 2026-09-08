@@ -132,6 +132,187 @@ npm run search -- "güvenlik kamerasıyla ses kaydı alınması"
 
 ---
 
+## Sistemi nasıl kurduk — aşama aşama
+
+### Özet
+
+```
+0. Keşif        kaynak sitenin yapısını çöz          → 36 sayfa, 313 link, düz HTML
+1. Doğrulama    altyapı gerçekten destekliyor mu?    → pgvector 0.8.2, HNSW, turkish FTS, HF token
+2. Şema         tablolar + Türkçe FTS konfigürasyonu → kvkk.decisions, kvkk.chunks
+3. Scrape       kararları indir                      → 310 karar, ort. 9.688 karakter
+4. Chunk        aranabilir parçalara böl             → 3.757 pasaj (ort. 12,1/karar)
+5. Embed        her pasajı vektöre çevir             → 1024 boyut, ~6 dk
+6. İndeks       HNSW + GIN + stoplex                 → 29 MB + 5,4 MB
+7. Retrieval    vektör + terim, RRF ile birleştir    → ~0,9 s ısınmış
+8. Sunum        alıntı, vurgulama, hüküm çıkarımı    → 298/310 hüküm
+9. Generation   bulunan kararlara dayalı cevap       → ~$0,012/soru
+```
+
+Aşağıda her aşamanın ne yaptığı, **neden** öyle yapıldığı ve ölçülen sonucu var.
+
+---
+
+### 0. Kaynağı keşfetmek
+
+Kod yazmadan önce kaynak sitenin nasıl çalıştığını çözdük:
+
+- Kararlar `?page=N` ile sayfalanıyor, pagination'daki `»` linki son sayfayı
+  veriyor → **36 sayfa** (scraper bunu her koşuda yeniden okur, sabit değil).
+- Liste sayfası markup'ı: `.members__item .members__item-meta` → `h2` (başlık) +
+  `a.read-more` (detay linki).
+- Detay sayfası: `.news__detail-article` → başlık + meta tablosu
+  (Karar Tarihi / Karar No / Konu Özeti) + gövde paragrafları.
+- **Kritik bulgu:** sayfalar server-rendered. Düz `fetch` tam HTML döndürüyor,
+  yani tarayıcı otomasyonu gerekmiyor → scrape dakikalar yerine saniyeler sürer.
+
+### 1. Altyapıyı doğrulamak (`npm run verify:db`)
+
+Şema yazmadan önce sunucunun gerekenleri gerçekten desteklediğini ölçtük.
+Varsaymak yerine ölçmek önemliydi: eksik bir eklenti migration'ı ya patlatır ya
+da sessizce yanlış konfigürasyon üretir.
+
+| Kontrol | Sonuç |
+| --- | --- |
+| Postgres | 17.6 |
+| pgvector | 0.8.2 (HNSW ve `iterative_scan` destekli) |
+| `turkish` full-text konfigürasyonu + `turkish_stem` | ✓ |
+| HF token / model boyutu | e5-large → 1024d ✓ |
+
+### 2. Şemayı kurmak (`npm run db:migrate`)
+
+`drizzle/*.sql` dosyaları `DIRECT_URL` (5432) üzerinden sırayla koşar.
+Üç önemli tercih:
+
+1. **Ayrı `kvkk` şeması.** Bu Supabase örneği başka bir projeyle paylaşımlı;
+   `public` altına yazmak çakışma riski taşıyordu ve `db:reset` yanlış veriyi
+   silebilirdi.
+2. **Türkçe + diyakritik-duyarsız FTS konfigürasyonu.**
+   `kvkk.turkish_unaccent` = `turkish` + `unaccent` sözlüğü. Kullanıcılar
+   "guvenlik kamerasi" yazıyor, metinde "güvenlik kamerası" geçiyor. Ölçtük:
+   ASCII yazım artık eşleşiyor, ekler stem'leniyor (`kararlarında` → `karar`),
+   karar no tek token kalıyor (`2024/2196`).
+3. **`tsvector` GENERATED kolonu.** `chunks.tsv` her INSERT'te otomatik dolar;
+   ayrı bir güncelleme adımı ve tutarsızlık riski yok.
+
+### 3. Kararları indirmek (`npm run scrape`)
+
+Liste sayfaları gezilir, ardından her detay sayfası indirilip parse edilir.
+
+- **Kibar davranır:** istekler arası 400 ms, hatalarda exponential backoff.
+- **Kaldığı yerden devam eder:** `data/decisions.json`'daki id'ler tekrar
+  indirilmez, her 25 kayıtta diske yazılır.
+- **Sonuç:** 313 linkten **310 karar** (2018–2026), ortalama 9.688 karakter.
+  Kalan 3'ü kaynak sitede kırık link (anasayfaya yönleniyor).
+
+Bu aşamada iki veri kusuru bulup düzelttik: eski format sayfalarda `:` ayrı
+hücrede değil değerin başında geliyordu (55 karar `: 2020/86` olarak
+kaydedilmişti) ve bazı sayfalarda etiket değerin içinde tekrar ediyordu
+(`Konu Özeti : …`).
+
+### 4. Chunking (`src/chunk.ts`)
+
+Kararlar ortalama ~10 bin karakter; tek vektörle temsil edilirse spesifik bir
+gerekçe kaybolur. Bu yüzden **1200 karakter hedef + 200 karakter overlap** ile
+parçalanır.
+
+Neden 1200: e5 modelleri 512 token'da kesiyor, Türkçe'de multilingual tokenizer
+~3 karakter/token üretiyor → ~1500 karakter güvenli üst sınır.
+
+Neden cümle sınırında: kararlar "…12 nci maddesinin (1) numaralı fıkrasında yer
+alan yükümlülüğü" gibi tek cümlede taşınan hukuki gerekçeler içeriyor. Sabit
+karakter penceresi bunları ortadan keserse chunk anlamsızlaşır. Kısaltma
+tuzakları (`md.`, `No.`, `12.`) elle geçilir.
+
+**Sonuç:** 3.757 pasaj, ortalama 12,1 pasaj/karar.
+
+### 5. Embedding (`npm run embed`)
+
+Her pasaj HF Inference API ile 1024 boyutlu vektöre çevrilir.
+
+- **Bağlam başlığı:** kararın Konu Özeti her chunk'a `head` kolonunda
+  denormalize edilir ve embedding girdisine eklenir. Karar gövdesi "veri
+  sorumlusu", "ilgili kişi" gibi genel ifadelerle yazılmış; hangi sektör/olay
+  olduğu çoğu zaman yalnızca başlıkta geçiyor. Başlık olmadan "hastane
+  kayıtları" gibi bir sorgu doğru kararı bulamıyor.
+- **E5 prefix'leri zorunlu:** doküman `passage: `, sorgu `query: `. Bu modeller
+  asimetrik eğitildi; prefix'i atlamak recall'u belirgin düşürür.
+- **Kaldığı yerden devam eder:** yalnızca `embedding IS NULL` olan pasajlar
+  işlenir. Metin değişirse embedding otomatik `NULL`'a çekilir ve yeniden
+  üretilir.
+- **Batch'li yazma:** DB uzak (Mumbai). Satır başına bir INSERT ~2.500
+  round-trip demekti; çok satırlı INSERT ile tek istekte 200 satır yazılıyor.
+
+**Sonuç:** 3.757 pasajın tamamı embed edildi, 0 başarısız batch. Ölçülen hız
+~6,6 pasaj/s (4 eşzamanlı istek) — tek seferde 3.661 pasaj 385 saniyede bitti.
+
+### 6. İndeksleme (`npm run db:index`)
+
+Veri yüklendikten **sonra** kurulur — boş tabloya index kurup 3.757 satır
+yazmak hem yavaş hem daha düşük kaliteli bir HNSW grafı üretir.
+
+| İndeks | Boyut | İşi |
+| --- | --- | --- |
+| `chunks_embedding_hnsw_idx` | 29 MB | vektör benzerliği (`vector_cosine_ops`) |
+| `chunks_tsv_idx` (GIN) | 5,4 MB | Türkçe full-text |
+| `kvkk.stoplex` | 46 satır | vurgulamada elenecek jenerik lexeme'ler |
+
+`stoplex` bu aşamada `ts_stat` ile hesaplanır (DF > %25). Arama sırasında
+hesaplamak pahalı olurdu; korpus başına bir kez yeter.
+
+### 7. Retrieval (`src/search/hybrid.ts`)
+
+Tek SQL statement'ında iki kol koşar, sonuç TypeScript'te birleştirilir:
+
+1. **Vektör kolu:** HNSW cosine, `LIMIT 60`
+2. **Terim kolu:** GIN + `ts_rank_cd`, `LIMIT 60`
+3. **RRF füzyonu:** `score += 1/(60 + sıra)` — skorlar farklı ölçeklerde olduğu
+   için sadece **sıra** kullanılır, kalibrasyon gerekmez
+4. **MaxP:** kararın skoru = en iyi pasajının skoru (toplamak uzun kararları
+   sistematik olarak öne çıkarırdı)
+
+Latency'yi burada 3,7 s'den ~0,9 s'ye indirdik: sorgular zaten hızlıydı
+(HNSW 30 ms, GIN 1 ms), darboğaz round-trip sayısıydı.
+
+### 8. Sunum katmanı
+
+Retrieval doğru sonucu bulduktan sonra, sonucun **okunabilir ve
+alıntılanabilir** olması gerekiyor:
+
+- **Vurgulama** eşleşme sorgusundan ayrı bir (gevşek, OR) sorguyla yapılır —
+  aksi halde vektörle bulunan sonuçlarda hiç vurgu çıkmıyor ve pasaj cümlenin
+  ortasından başlıyordu.
+- **Jenerik terimler elenir** (`stoplex`), yoksa `veri` / `kişisel` her yerde
+  işaretleniyordu.
+- **Hüküm çıkarımı** (`src/extract.ts`): kararın operatif bloğu ve yaptırım
+  etiketi regex ile çıkarılır — LLM çağrısı yok, dolayısıyla maliyeti yok.
+  Kapsam: 298/310 hüküm, 247/310 yaptırım, 101/310 ceza tutarı.
+
+### 9. Cevap üretimi (`src/chat.ts`) — Analiz modu
+
+Bu son aşama ve tek ücretli bileşen. Akış:
+
+```
+kullanıcı sorusu
+  → hybridSearch (aynı ücretsiz retrieval, 6 karar)
+  → bağlam: karar no + tarih + konu + yaptırım + pasaj + hüküm
+  → gpt-4.1 (temperature 0.2, "yalnızca verilen kararları kullan")
+  → NDJSON akışı: sources → delta… → done(usage)
+```
+
+Halüsinasyona karşı üç katman:
+
+1. Sistem prompt'u modele yalnızca verilen kararları kullanmasını, yetmiyorsa
+   bunu açıkça söylemesini emreder.
+2. Her iddia karar numarasıyla belgelenir (`[2024/2196]`).
+3. **UI atıfları doğrular:** kaynak listesinde olmayan bir karar numarası link
+   yapılmaz, sarı uyarı olarak işaretlenir. Testlerde uydurma atıf sayısı 0.
+
+**Ölçülen:** ~3.200 girdi + ~700 çıktı token ≈ **$0,012/soru**. UI her cevabın
+altında gerçek token kullanımını gösterir.
+
+---
+
 ## Tasarım kararları
 
 **Neden hybrid (vektör + full-text)?** Hukuki aramada iki farklı ihtiyaç var:
