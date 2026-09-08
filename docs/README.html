@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<title>kvkk-rag — Belge</title>
+<style>
+@page { size: A4; margin: 18mm 16mm; }
+* { box-sizing: border-box; }
+body { font-family: "Segoe UI", "Segoe UI Emoji", system-ui, sans-serif; font-size: 10.5pt;
+       line-height: 1.55; color: #1a1a2e; }
+h1 { font-size: 22pt; color: #16213e; border-bottom: 3px solid #4361ee; padding-bottom: 8px; margin: 0 0 6px; }
+h2 { font-size: 15pt; color: #16213e; border-bottom: 1px solid #d3d6e6; padding-bottom: 4px; margin: 26px 0 10px; }
+h3 { font-size: 12.5pt; color: #3a0ca3; margin: 20px 0 8px; }
+p  { margin: 8px 0; }
+code { font-family: Consolas, "Cascadia Code", monospace; font-size: 9pt; background: #eef0f7;
+       padding: 1px 5px; border-radius: 4px; color: #b5179e; }
+pre { background: #16213e; color: #e6e8f5; padding: 14px 16px; border-radius: 8px; overflow-x: auto; margin: 12px 0; }
+pre code { background: none; color: inherit; padding: 0; font-size: 8.4pt; white-space: pre; }
+table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 9.5pt; }
+th, td { border: 1px solid #cfd2e0; padding: 7px 10px; text-align: left; vertical-align: top; }
+th { background: #4361ee; color: #fff; }
+tr:nth-child(even) td { background: #f4f5fb; }
+blockquote { border-left: 4px solid #f9c74f; background: #fff9e6; margin: 14px 0; padding: 8px 16px;
+             border-radius: 0 6px 6px 0; }
+blockquote p { margin: 5px 0; }
+a { color: #4361ee; text-decoration: none; }
+hr { border: none; border-top: 1px solid #d3d6e6; margin: 22px 0; }
+ul, ol { padding-left: 22px; margin: 8px 0; }
+li { margin: 4px 0; }
+h1, h2, h3 { page-break-after: avoid; }
+pre, table, blockquote { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+<h1>kvkk-rag</h1>
+<p>KVKK (Kişisel Verileri Koruma Kurumu) <strong>kurul karar özetleri</strong> üzerinde semantik arama ve analiz. Kararların tamamı indekslenir, sorgular hem anlam (vektör) hem terim (Türkçe full-text) tarafından aranır ve iki sonuç listesi RRF ile birleştirilir.</p>
+<p>İki mod var:</p>
+<table><thead><tr><th>Mod</th><th>Ne yapar</th><th>Maliyet</th></tr></thead><tbody><tr><td><strong>Arama</strong></td><td>İlgili kurul kararlarını bulur, eşleşen pasajı vurgular, kararın hükmünü ve yaptırımını gösterir</td><td><strong>Ücretsiz</strong></td></tr><tr><td><strong>Analiz</strong></td><td>Aynı retrieval + LLM'in yalnızca bulunan kararlara dayanarak ürettiği, karar numarasıyla belgelenmiş cevap</td><td>Soru başına ~$0,012</td></tr></tbody></table>
+<ul><li><strong>Stack:</strong> Next.js 15 (App Router), TypeScript, Node 20+, Tailwind v4</li><li><strong>Vektör deposu:</strong> Supabase Postgres + <strong>pgvector</strong> (HNSW, cosine)</li><li><strong>Embedding:</strong> Hugging Face Inference API — <code>intfloat/multilingual-e5-large</code> (1024d, açık kaynak, ücretsiz)</li><li><strong>Cevap üretimi:</strong> OpenAI <code>gpt-4.1</code> (yalnızca Analiz modunda)</li><li><strong>Tüm key'ler server-side.</strong> Hiçbir değişken <code>NEXT_PUBLIC_</code> almaz; tarayıcı ne HF'e, ne OpenAI'a, ne Postgres'e doğrudan bağlanır — yalnızca <code>/api/search</code> ve <code>/api/chat</code>'e gider. <code>OPENAI_API_KEY</code> yoksa arama çalışmaya devam eder, yalnızca Analiz sekmesi devre dışı kalır.</li></ul>
+<hr>
+<h2>Klasör yapısı</h2>
+<pre><code>drizzle/
+  0000_init.sql            # şema: pgvector, unaccent'li Türkçe TS config, tablolar, GIN
+scripts/
+  00-verify-db.ts          # pgvector + HNSW + turkish full-text desteği kontrolü
+  01-migrate.ts            # drizzle/*.sql dosyalarını DIRECT_URL üzerinden koşar
+  02-scrape.ts             # kvkk.gov.tr -&gt; data/decisions.json  (resume'lu)
+  03-embed.ts              # chunk + embed -&gt; Postgres          (resume'lu)
+  04-build-indexes.ts      # HNSW indeksi (veri yüklendikten SONRA) + ANALYZE
+  05-search-cli.ts         # terminalden arama (UI'sız kalite kontrolü)
+  99-reset.ts              # kvkk şemasını düşür (model/boyut değişikliği için)
+src/
+  config.ts                # model/boyut/chunk/arama parametreleri — tek kaynak
+  chunk.ts                 # Türkçe cümle sınırına duyarlı chunking
+  extract.ts               # hüküm bloğu + yaptırım çıkarımı (regex, ücretsiz)
+  chat.ts                  # retrieval + OpenAI cevap üretimi (Analiz modu)
+  corpus.ts                # UI için indeks durumu
+  db/{schema,client,direct}.ts
+  embeddings/hf.ts         # HF feature-extraction + E5 prefix'leri
+  scrape/kvkk.ts           # liste + detay sayfası parser'ları
+  search/hybrid.ts         # pgvector + full-text, RRF füzyonu
+  app/
+    page.tsx               # ana sayfa (server component)
+    components/
+      Workspace.tsx        # Arama / Analiz sekmeleri
+      SearchBar.tsx
+      Chat.tsx             # akışlı cevap + tıklanabilir atıflar
+    api/search/route.ts
+    api/chat/route.ts      # NDJSON akışı: sources -&gt; delta… -&gt; done
+data/                      # scrape çıktısı (gitignore)</code></pre>
+<hr>
+<h2>Kurulum</h2>
+<h3>1) Bağımlılıklar</h3>
+<pre><code>npm install</code></pre>
+<h3>2) Ortam değişkenleri</h3>
+<pre><code>cp .env.example .env</code></pre>
+<table><thead><tr><th>Değişken</th><th>Açıklama</th></tr></thead><tbody><tr><td><code>HF_TOKEN</code></td><td>Hugging Face token ("Read" yetkisi yeterli)</td></tr><tr><td><code>HF_EMBEDDING_MODEL</code></td><td><code>intfloat/multilingual-e5-large</code> (default)</td></tr><tr><td><code>HF_EMBEDDING_DIM</code></td><td><code>1024</code> (e5-large) / <code>768</code> (e5-base)</td></tr><tr><td><code>OPENAI_API_KEY</code></td><td><strong>Opsiyonel.</strong> Yalnızca Analiz modu için; yoksa arama çalışır</td></tr><tr><td><code>OPENAI_CHAT_MODEL</code></td><td><code>gpt-4.1</code> (default)</td></tr><tr><td><code>DATABASE_URL</code></td><td>Supabase <strong>pooler</strong> (port <strong>6543</strong>) — uygulama sorguları</td></tr><tr><td><code>DIRECT_URL</code></td><td>Supabase <strong>direct</strong> (port <strong>5432</strong>) — migration / DDL</td></tr></tbody></table>
+<blockquote><p><strong>⚠️ <code>.env</code> yalnızca sunucu başlangıcında okunur.</strong> <code>OPENAI_API_KEY</code> ekledikten sonra <code>npm run dev</code>'i yeniden başlatmadan Analiz sekmesi görünmez.</p></blockquote>
+<blockquote><p><strong>⚠️ Pooler uyarısı:</strong> <code>6543</code> transaction pooler'dır, prepared statement desteklemez. <code>src/db/client.ts</code> bağlantıyı <code>prepare: false</code> ile kurar. DDL (CREATE EXTENSION / CREATE INDEX) pooler üzerinden güvenilir çalışmaz; bu yüzden migration ve index script'leri <code>DIRECT_URL</code> kullanır. Bu ikisini karıştırırsan işlemler anlaşılmaz hatalarla patlar.</p></blockquote>
+<hr>
+<h2>Çalıştırma sırası</h2>
+<pre><code>npm run verify:db     # pgvector, HNSW, 'turkish' full-text desteği raporu
+npm run db:migrate    # kvkk şeması + tablolar + GIN index (DIRECT_URL)
+npm run scrape        # data/decisions.json  (36 sayfa -&gt; 310 karar)
+npm run embed         # chunk + HF embedding -&gt; Postgres  (3.757 pasaj, ~6 dk)
+npm run db:index      # HNSW vektör indeksi + ANALYZE</code></pre>
+<p><code>npm run embed</code> varsayılan olarak 2 eşzamanlı HF isteği kullanır; <code>-- --concurrency 4</code> ile hızlandırılabilir (ölçülen: ~6,6 pasaj/s).</p>
+<p>Ardından:</p>
+<pre><code>npm run dev
+# http://localhost:3000</code></pre>
+<p>Terminalden hızlı kalite kontrolü:</p>
+<pre><code>npm run search -- "güvenlik kamerasıyla ses kaydı alınması"</code></pre>
+<h3>Kesintiye dayanıklılık</h3>
+<p><code>scrape</code> ve <code>embed</code> <strong>yeniden koşulabilir ve kaldığı yerden devam eder</strong>:</p>
+<ul><li><code>scrape</code> yalnızca <code>data/decisions.json</code> içinde olmayan id'leri indirir (<code>--force</code> ile hepsini yeniden indirir), her 25 kayıtta diske yazar.</li><li><code>embed</code> yalnızca <code>embedding IS NULL</code> olan chunk'ları işler. HF rate limit'e girip koşu yarıda kalırsa <code>npm run embed</code> komutunu tekrar çalıştır.</li></ul>
+<hr>
+<h2>Sistemi nasıl kurduk — aşama aşama</h2>
+<h3>Özet</h3>
+<pre><code>0. Keşif        kaynak sitenin yapısını çöz          → 36 sayfa, 313 link, düz HTML
+1. Doğrulama    altyapı gerçekten destekliyor mu?    → pgvector 0.8.2, HNSW, turkish FTS, HF token
+2. Şema         tablolar + Türkçe FTS konfigürasyonu → kvkk.decisions, kvkk.chunks
+3. Scrape       kararları indir                      → 310 karar, ort. 9.688 karakter
+4. Chunk        aranabilir parçalara böl             → 3.757 pasaj (ort. 12,1/karar)
+5. Embed        her pasajı vektöre çevir             → 1024 boyut, ~6 dk
+6. İndeks       HNSW + GIN + stoplex                 → 29 MB + 5,4 MB
+7. Retrieval    vektör + terim, RRF ile birleştir    → ~0,9 s ısınmış
+8. Sunum        alıntı, vurgulama, hüküm çıkarımı    → 298/310 hüküm
+9. Generation   bulunan kararlara dayalı cevap       → ~$0,012/soru</code></pre>
+<p>Aşağıda her aşamanın ne yaptığı, <strong>neden</strong> öyle yapıldığı ve ölçülen sonucu var.</p>
+<hr>
+<h3>0. Kaynağı keşfetmek</h3>
+<p>Kod yazmadan önce kaynak sitenin nasıl çalıştığını çözdük:</p>
+<ul><li>Kararlar <code>?page=N</code> ile sayfalanıyor, pagination'daki <code>»</code> linki son sayfayı veriyor → <strong>36 sayfa</strong> (scraper bunu her koşuda yeniden okur, sabit değil).</li><li>Liste sayfası markup'ı: <code>.members__item .members__item-meta</code> → <code>h2</code> (başlık) + <code>a.read-more</code> (detay linki).</li><li>Detay sayfası: <code>.news__detail-article</code> → başlık + meta tablosu (Karar Tarihi / Karar No / Konu Özeti) + gövde paragrafları.</li><li><strong>Kritik bulgu:</strong> sayfalar server-rendered. Düz <code>fetch</code> tam HTML döndürüyor, yani tarayıcı otomasyonu gerekmiyor → scrape dakikalar yerine saniyeler sürer.</li></ul>
+<h3>1. Altyapıyı doğrulamak (<code>npm run verify:db</code>)</h3>
+<p>Şema yazmadan önce sunucunun gerekenleri gerçekten desteklediğini ölçtük. Varsaymak yerine ölçmek önemliydi: eksik bir eklenti migration'ı ya patlatır ya da sessizce yanlış konfigürasyon üretir.</p>
+<table><thead><tr><th>Kontrol</th><th>Sonuç</th></tr></thead><tbody><tr><td>Postgres</td><td>17.6</td></tr><tr><td>pgvector</td><td>0.8.2 (HNSW ve <code>iterative_scan</code> destekli)</td></tr><tr><td><code>turkish</code> full-text konfigürasyonu + <code>turkish_stem</code></td><td>✓</td></tr><tr><td>HF token / model boyutu</td><td>e5-large → 1024d ✓</td></tr></tbody></table>
+<h3>2. Şemayı kurmak (<code>npm run db:migrate</code>)</h3>
+<p><code>drizzle/*.sql</code> dosyaları <code>DIRECT_URL</code> (5432) üzerinden sırayla koşar. Üç önemli tercih:</p>
+<ol><li><strong>Ayrı <code>kvkk</code> şeması.</strong> Bu Supabase örneği başka bir projeyle paylaşımlı; <code>public</code> altına yazmak çakışma riski taşıyordu ve <code>db:reset</code> yanlış veriyi silebilirdi.</li><li><strong>Türkçe + diyakritik-duyarsız FTS konfigürasyonu.</strong> <code>kvkk.turkish_unaccent</code> = <code>turkish</code> + <code>unaccent</code> sözlüğü. Kullanıcılar "guvenlik kamerasi" yazıyor, metinde "güvenlik kamerası" geçiyor. Ölçtük: ASCII yazım artık eşleşiyor, ekler stem'leniyor (<code>kararlarında</code> → <code>karar</code>), karar no tek token kalıyor (<code>2024/2196</code>).</li><li><strong><code>tsvector</code> GENERATED kolonu.</strong> <code>chunks.tsv</code> her INSERT'te otomatik dolar; ayrı bir güncelleme adımı ve tutarsızlık riski yok.</li></ol>
+<h3>3. Kararları indirmek (<code>npm run scrape</code>)</h3>
+<p>Liste sayfaları gezilir, ardından her detay sayfası indirilip parse edilir.</p>
+<ul><li><strong>Veritabanına dokunmaz:</strong> bu adımın tek çıktısı <code>data/decisions.json</code> — diskte bir JSON dosyası. Kararların DB'ye yazılması burada değil, bir sonraki adımda (<code>npm run embed</code>) olur.</li><li><strong>Kibar davranır:</strong> istekler arası 400 ms, hatalarda exponential backoff.</li><li><strong>Kaldığı yerden devam eder:</strong> <code>data/decisions.json</code>'daki id'ler tekrar indirilmez, her 25 kayıtta diske yazılır.</li><li><strong>Sonuç:</strong> 313 linkten <strong>310 karar</strong> (2018–2026), ortalama 9.688 karakter. Kalan 3'ü kaynak sitede kırık link (anasayfaya yönleniyor).</li></ul>
+<p>Bu aşamada iki veri kusuru bulup düzelttik: eski format sayfalarda <code>:</code> ayrı hücrede değil değerin başında geliyordu (55 karar <code>: 2020/86</code> olarak kaydedilmişti) ve bazı sayfalarda etiket değerin içinde tekrar ediyordu (<code>Konu Özeti : …</code>).</p>
+<h3>4. Chunking (<code>src/chunk.ts</code>)</h3>
+<p>Kararlar ortalama ~10 bin karakter; tek vektörle temsil edilirse spesifik bir gerekçe kaybolur. Bu yüzden <strong>1200 karakter hedef + 200 karakter overlap</strong> ile parçalanır.</p>
+<p>Neden 1200: e5 modelleri 512 token'da kesiyor, Türkçe'de multilingual tokenizer ~3 karakter/token üretiyor → ~1500 karakter güvenli üst sınır.</p>
+<p>Neden cümle sınırında: kararlar "…12 nci maddesinin (1) numaralı fıkrasında yer alan yükümlülüğü" gibi tek cümlede taşınan hukuki gerekçeler içeriyor. Sabit karakter penceresi bunları ortadan keserse chunk anlamsızlaşır. Kısaltma tuzakları (<code>md.</code>, <code>No.</code>, <code>12.</code>) elle geçilir.</p>
+<p><strong>Sonuç:</strong> 3.757 pasaj, ortalama 12,1 pasaj/karar.</p>
+<h3>5. Veritabanına yazma + embedding (<code>npm run embed</code>)</h3>
+<p><strong>Kafa karıştıran nokta burada netleşiyor.</strong> Bir önceki adım (<code>scrape</code>) veritabanına hiç dokunmadı; elimizde yalnızca <code>data/decisions.json</code> var. Kararların ve chunk'ların DB'ye yazılmasının <strong>tamamı</strong> bu tek script'te (<code>scripts/03-embed.ts</code>) ve sırayla üç alt-adımda olur:</p>
+<ol><li><strong>Kararlar → <code>kvkk.decisions</code>.</strong> Her karar *ham ve bütün* haliyle yazılır: tam gövde (<code>body</code>), başlık, karar no/tarihi, meta ve regex ile çıkarılan hüküm/yaptırım. <strong>Bu tabloda vektör yoktur</strong> — burası gösterim ve alıntı kaydıdır, arama birimi değil.</li><li><strong>Chunk'lar → <code>kvkk.chunks</code>.</strong> <code>chunkText(body)</code> her kararı pasajlara böler ve pasajlar bu tabloya yazılır — <strong>ama <code>embedding</code> kolonu bu noktada boş (<code>NULL</code>).</strong> Yani chunk önce yalnızca *metin* olarak kaydedilir.</li><li><strong>Embedding.</strong> Ayrı bir geçişte yalnızca <code>embedding IS NULL</code> olan pasajlar HF'e gönderilir; dönen 1024 boyutlu vektör <code>UPDATE</code> ile aynı satıra yazılır.</li></ol>
+<p>Yani chunk'lar "tek hamlede vektörlenmiş halde" değil, <strong>önce metin, sonra vektör</strong> olarak iki geçişte yazılır. Bunu bilerek ayırdık: chunk metnini yazmak ucuz (yerel DB işlemi), vektör üretmek pahalı (uzak API + rate limit). Ayrı oldukları için koşu yarıda kalsa bile <code>npm run embed</code>'i tekrar çalıştırmak yalnızca eksik kalan vektörleri tamamlar, baştan başlamaz.</p>
+<p><strong><code>head</code> + <code>text</code> — embedding'e tam olarak ne gönderiyoruz?</strong> Her chunk satırı iki ayrı metin alanı taşır:</p>
+<ul><li><strong><code>text</code></strong> = pasajın kendisi; kararın gövdesinden kesilen ~1200 karakterlik parça. Kullanıcının UI'da okuduğu, vurgulanan snippet <strong>budur</strong>.</li><li><strong><code>head</code></strong> = kararın <strong>Konu Özeti</strong> (yoksa başlığı), her chunk'a kopyalanan (denormalize edilen) bağlam başlığı. Kararın "neyle ilgili" olduğunu söyler.</li></ul>
+<p>HF'e giden metin ikisinin birleşimidir: <code>head + "\n\n" + text</code>. Neden ikisi birden: karar gövdesi "veri sorumlusu", "ilgili kişi" gibi jenerik hukuki ifadelerle yazılmış; olayın hangi sektörde geçtiği (hastane, banka, kargo…) çoğu zaman <strong>yalnızca Konu Özeti'nde</strong> geçiyor. <code>head</code> olmadan "hastane kayıtları" sorgusu, gövdesinde "hastane" kelimesi hiç geçmeyen doğru kararı bulamaz. Aynı <code>head</code> full-text <code>tsv</code>'ye de girer (böylece terim araması da başlıktan yakalar). Ama <strong>kullanıcıya gösterilen pasaj yalnızca <code>text</code></strong> — başlığı <code>text</code>'in içine gömseydik her snippet aynı cümleyle başlardı.</p>
+<ul><li><strong>E5 prefix'leri zorunlu:</strong> doküman <code>passage: </code>, sorgu <code>query: </code>. Bu modeller asimetrik eğitildi; prefix'i atlamak recall'u belirgin düşürür.</li><li><strong>Kaldığı yerden devam eder:</strong> yalnızca <code>embedding IS NULL</code> olan pasajlar işlenir. Metin değişirse embedding otomatik <code>NULL</code>'a çekilir ve yeniden üretilir.</li><li><strong>Batch'li yazma:</strong> DB uzak (Mumbai). Satır başına bir INSERT ~2.500 round-trip demekti; çok satırlı INSERT ile tek istekte 200 satır yazılıyor.</li></ul>
+<p><strong>Sonuç:</strong> 3.757 pasajın tamamı embed edildi, 0 başarısız batch. Ölçülen hız ~6,6 pasaj/s (4 eşzamanlı istek) — tek seferde 3.661 pasaj 385 saniyede bitti.</p>
+<h3>6. İndeksleme (<code>npm run db:index</code>)</h3>
+<p>Veri yüklendikten <strong>sonra</strong> kurulur — boş tabloya index kurup 3.757 satır yazmak hem yavaş hem daha düşük kaliteli bir HNSW grafı üretir.</p>
+<table><thead><tr><th>İndeks</th><th>Boyut</th><th>İşi</th></tr></thead><tbody><tr><td><code>chunks_embedding_hnsw_idx</code></td><td>29 MB</td><td>vektör benzerliği (<code>vector_cosine_ops</code>)</td></tr><tr><td><code>chunks_tsv_idx</code> (GIN)</td><td>5,4 MB</td><td>Türkçe full-text</td></tr><tr><td><code>kvkk.stoplex</code></td><td>46 satır</td><td>vurgulamada elenecek jenerik lexeme'ler</td></tr></tbody></table>
+<p><code>stoplex</code> bu aşamada <code>ts_stat</code> ile hesaplanır (DF &gt; %25). Arama sırasında hesaplamak pahalı olurdu; korpus başına bir kez yeter.</p>
+<h3>7. Retrieval (<code>src/search/hybrid.ts</code>)</h3>
+<p>Tek SQL statement'ında iki kol koşar, sonuç TypeScript'te birleştirilir:</p>
+<ol><li><strong>Vektör kolu:</strong> HNSW cosine, <code>LIMIT 60</code></li><li><strong>Terim kolu:</strong> GIN + <code>ts_rank_cd</code>, <code>LIMIT 60</code></li><li><strong>RRF füzyonu:</strong> <code>score += 1/(60 + sıra)</code> — skorlar farklı ölçeklerde olduğu için sadece <strong>sıra</strong> kullanılır, kalibrasyon gerekmez</li><li><strong>MaxP:</strong> kararın skoru = en iyi pasajının skoru (toplamak uzun kararları sistematik olarak öne çıkarırdı)</li></ol>
+<p>Latency'yi burada 3,7 s'den ~0,9 s'ye indirdik: sorgular zaten hızlıydı (HNSW 30 ms, GIN 1 ms), darboğaz round-trip sayısıydı.</p>
+<h3>8. Sunum katmanı</h3>
+<p>Retrieval doğru sonucu bulduktan sonra, sonucun <strong>okunabilir ve alıntılanabilir</strong> olması gerekiyor:</p>
+<ul><li><strong>Vurgulama</strong> eşleşme sorgusundan ayrı bir (gevşek, OR) sorguyla yapılır — aksi halde vektörle bulunan sonuçlarda hiç vurgu çıkmıyor ve pasaj cümlenin ortasından başlıyordu.</li><li><strong>Jenerik terimler elenir</strong> (<code>stoplex</code>), yoksa <code>veri</code> / <code>kişisel</code> her yerde işaretleniyordu.</li><li><strong>Hüküm çıkarımı</strong> (<code>src/extract.ts</code>): kararın operatif bloğu ve yaptırım etiketi regex ile çıkarılır — LLM çağrısı yok, dolayısıyla maliyeti yok. Kapsam: 298/310 hüküm, 247/310 yaptırım, 101/310 ceza tutarı.</li></ul>
+<h3>9. Cevap üretimi (<code>src/chat.ts</code>) — Analiz modu</h3>
+<p>Bu son aşama ve tek ücretli bileşen. Akış:</p>
+<pre><code>kullanıcı sorusu
+  → hybridSearch (aynı ücretsiz retrieval, 6 karar)
+  → bağlam: karar no + tarih + konu + yaptırım + pasaj + hüküm
+  → gpt-4.1 (temperature 0.2, "yalnızca verilen kararları kullan")
+  → NDJSON akışı: sources → delta… → done(usage)</code></pre>
+<p>Halüsinasyona karşı üç katman:</p>
+<ol><li>Sistem prompt'u modele yalnızca verilen kararları kullanmasını, yetmiyorsa bunu açıkça söylemesini emreder.</li><li>Her iddia karar numarasıyla belgelenir (<code>[2024/2196]</code>).</li><li><strong>UI atıfları doğrular:</strong> kaynak listesinde olmayan bir karar numarası link yapılmaz, sarı uyarı olarak işaretlenir. Testlerde uydurma atıf sayısı 0.</li></ol>
+<p><strong>Ölçülen:</strong> ~3.200 girdi + ~700 çıktı token ≈ <strong>$0,012/soru</strong>. UI her cevabın altında gerçek token kullanımını gösterir.</p>
+<hr>
+<h2>Tasarım kararları</h2>
+<p><strong>Neden hybrid (vektör + full-text)?</strong> Hukuki aramada iki farklı ihtiyaç var: "biyometrik veriyle mesai takibi" gibi kavramsal sorgular vektör tarafını, "2024/2196", "12 nci madde", "fidye yazılımı" gibi tam terimler full-text tarafını gerektiriyor. Tek başına vektör araması ikinci grubu kaçırıyor.</p>
+<p><strong>Neden RRF (Reciprocal Rank Fusion)?</strong> İki kolun skorları farklı ölçeklerde (cosine 0–1, <code>ts_rank_cd</code> sınırsız). Skorları normalize edip toplamak ölçek varsayımlarına bağımlı kalır; RRF yalnızca <strong>sırayı</strong> kullanır, kalibrasyon gerektirmez.</p>
+<p><strong>Neden <code>turkish_unaccent</code> text search config?</strong> Kullanıcılar "guvenlik", "sifreleme" gibi ASCII yazımlar deniyor. <code>unaccent</code> + <code>turkish_stem</code> mapping'i hem diyakritikleri hem ekleri normalize ediyor ("kararlarında" → "karar"). <code>to_tsvector(regconfig, text)</code> IMMUTABLE olduğu için bu config GENERATED kolonda kullanılabiliyor.</p>
+<p><strong>Neden chunk seviyesinde arama, karar seviyesinde sonuç?</strong> Kararlar ortalama ~12 bin karakter; tek vektörle temsil edilirse spesifik bir gerekçe kayboluyor. Chunk'lar aranıp <strong>MaxP</strong> (kararın skoru = en iyi chunk'ının skoru) ile karar seviyesine çıkılıyor. Skor toplamak uzun kararları sistematik olarak öne çıkarırdı.</p>
+<p><strong>Neden <code>chunks.head</code> ayrı bir kolon?</strong> Karar gövdesi "veri sorumlusu", "ilgili kişi" gibi genel ifadelerle yazılmış; hangi sektör/olay olduğu çoğu zaman yalnızca başlıkta geçiyor. Bu yüzden kararın Konu Özeti her chunk'a denormalize edilir ve <strong>hem embedding girdisine hem tsvector'e</strong> girer — "hastane kayıtları" gibi bir sorgu böylece doğru kararı bulur. Ama UI'da gösterilen pasaj yalnızca <code>text</code>; başlığı chunk metnine gömmek snippet'in başlığı tekrar etmesine yol açardı. (GENERATED kolon başka tabloya bakamadığı için denormalizasyon zorunlu.)</p>
+<p><strong>Neden E5 prefix'leri?</strong> <code>intfloat/multilingual-e5-*</code> modelleri asimetrik eğitildi: doküman <code>passage: </code>, sorgu <code>query: </code> prefix'i ister. Prefix'i atlamak recall'u belirgin düşürür. <code>src/config.ts</code> model adında "e5" yoksa prefix'i otomatik kapatır.</p>
+<p><strong>Neden HNSW migration'da değil?</strong> Boş tabloya index kurup 3–4 bin satır yazmak, veriyi yazıp sonra index kurmaktan hem yavaş hem daha düşük kaliteli graf üretir. Bu yüzden <code>npm run db:index</code> ayrı adım.</p>
+<p><strong>Neden iki arama kolu tek SQL statement'ında?</strong> Sorguların kendisi hızlı (ölçülen: HNSW ~30 ms, GIN ~1 ms) ama DB uzak — boş bir <code>SELECT 1</code> bile ~250 ms. Kolları ayrı ayrı, üstelik <code>SET LOCAL</code> için transaction içinde koşturmak 5–6 round-trip demekti (~3,7 s). Tek statement + postgres-js'in transaction pipeline'ı bunu ~0,9 s'ye indirdi.</p>
+<blockquote><p><strong>⚠️ <code>HNSW_EF_SEARCH</code> ile <code>CANDIDATE_POOL</code> bağlantılı.</strong> HNSW bir sorguda <code>ef_search</code>'ten fazla satır döndürmez. pgvector varsayılanı 40; pool 60 iken <code>SET LOCAL hnsw.ef_search</code> atlanırsa LIMIT'e rağmen sessizce 40 aday gelir ve füzyon zayıflar. <code>src/config.ts</code> bu yüzden ikisini birlikte tutuyor.</p></blockquote>
+<p><strong>Neden vurgulama, eşleşme sorgusundan ayrı bir sorgu kullanıyor?</strong> Eşleşmede <code>websearch_to_tsquery</code> terimleri AND'liyor — seçici olması istediğimiz davranış. Ama aynı sorguyu gösterimde kullanmak, vektörle bulunan sonuçlarda <code>tsv @@ q</code> false olduğu için <code>ts_headline</code>'ı tamamen devre dışı bırakıyordu: pasaj chunk'ın ham başından alınıyor ve overlap yüzünden cümlenin ortasından başlıyordu ("yandan, Kanun'un…"). Vurgulama artık gevşek (OR) bir sorguyla yapılıyor.</p>
+<p><strong>Neden <code>kvkk.stoplex</code>?</strong> Gevşek sorgu "veri", "kişisel" gibi terimleri de işaretliyordu — ölçüm (<code>ts_stat</code>, 3.757 chunk): <code>ver</code> %92,5, <code>kisisel</code> %86,6, <code>ilgil</code> %84,5. Korpusun %92'sinde geçen bir kelimeyi vurgulamak "bu sonuç neden ilgili" sorusuna cevap vermiyor, sadece pasajı okunmaz yapıyor. <code>npm run db:index</code> DF &gt; %25 olan lexeme'leri (46 tane) bu tabloya yazıyor ve vurgulama sorgusundan eleniyor. Sorgunun tamamı jenerik terimden oluşuyorsa (ör. "kişisel veri") hepsine geri düşülüyor — hiç vurgu olmamasından iyi.</p>
+<p><strong>Neden hüküm ayrı bir blok olarak çıkarılıyor?</strong> KVKK kararları tutarlı bir kuyruk yapısı izliyor: gerekçe maddeleri (<code>&lt;ul&gt;</code>) → "hususları dikkate alındığında…" operatif paragraf → <code>karar verilmiştir.</code> Bu son cümle çoğu zaman 18 karakterlik ayrı bir paragraf (310 kararın 203'ünde), dolayısıyla yalnızca onu almak hiçbir bilgi vermiyor. <code>src/extract.ts</code> bloğun sonunu "karar veril…" ile, başını operatif açılış kalıbıyla bulur; kalıp yoksa karakter bütçesiyle geriye gider. Kapsam: <strong>298/310</strong>.</p>
+<p><strong>Neden yaptırım yalnızca hüküm bloğundan çıkarılıyor?</strong> "idari para cezası", "şikâyetin reddine" gibi ifadeler kararın anlatı kısmında da geçiyor (tarafların iddiaları, mevzuat alıntıları, önceki kararlara atıflar). Gövdenin tamamına bakmak yanlış etiket üretiyordu.</p>
+<hr>
+<h2>Model / boyut değiştirmek</h2>
+<p><code>HF_EMBEDDING_DIM</code> şemadaki <code>vector(N)</code> kolonunu belirler, yani boyut değişikliği şema değişikliğidir:</p>
+<pre><code># .env içinde HF_EMBEDDING_MODEL + HF_EMBEDDING_DIM güncelle, sonra:
+npm run db:reset -- --yes   # kvkk şemasını düşürür; data/decisions.json'a dokunmaz
+npm run db:migrate
+npm run embed               # scrape'i tekrarlamaya gerek yok
+npm run db:index</code></pre>
+<p><code>npm run verify:db</code> tablodaki boyutla <code>.env</code>'in uyuşmadığını tespit edip uyarır.</p>
+<hr>
+<h2>Maliyet ve sınırlar</h2>
+<p>Ölçülen durum (310 karar / 3.757 pasaj / 1024 boyut):</p>
+<table><thead><tr><th>Bileşen</th><th>Servis</th><th>Durum</th></tr></thead><tbody><tr><td>Embedding</td><td>HF Inference API</td><td>Ücretsiz katman — indeksleme 3.757 çağrı (tek seferlik), arama başına 1 çağrı</td></tr><tr><td>Veritabanı</td><td>Supabase Postgres + pgvector</td><td><code>kvkk</code> şeması <strong>69 MB</strong> (500 MB ücretsiz limitten)</td></tr><tr><td>Hüküm / yaptırım özeti</td><td>—</td><td>Deterministik regex çıkarımı (<code>src/extract.ts</code>), API çağrısı yok</td></tr><tr><td>Cevap üretimi (Analiz)</td><td>OpenAI <code>gpt-4.1</code></td><td>Ölçülen: soru başına ~3.200 girdi + ~700 çıktı token ≈ <strong>$0,012</strong></td></tr></tbody></table>
+<p>Analiz maliyeti yalnızca kullanıcı soru sorduğunda oluşur; arama ve karar listeleme hiçbir ücretli servise dokunmaz. UI her cevabın altında gerçek token kullanımını ve tahmini maliyeti gösterir (<code>Chat.tsx</code> içindeki fiyat sabitleri gpt-4.1 liste fiyatıdır: 1M girdi $2 / 1M çıktı $8).</p>
+<p>İki sınıra dikkat:</p>
+<ol><li><strong>HF ücretsiz katmanının aylık kredisi var.</strong> Limit aşılırsa HF 429 döner; <code>src/embeddings/hf.ts</code> exponential backoff ile 6 kez dener, <code>/api/search</code> ise kullanıcıya anlaşılır bir mesaj gösterir. Toplu indekslemede <code>npm run embed</code> kaldığı yerden devam ettiği için koşuyu tekrarlamak yeter.</li><li><strong>Supabase ücretsiz projeler ~7 gün hareketsizlikte duraklatılır</strong>, panelden elle devam ettirmek gerekir.</li></ol>
+<hr>
+<h2>Bilinen sorunlar</h2>
+<ul><li><strong>KVKK'nın kendi kırık linkleri.</strong> Liste sayfalarındaki 3 kayıt (<code>/Icerik/5462/2019/47</code>, <code>5464/2019/52</code>, <code>5461/2019/122</code>) kaynak sitede anasayfaya yönleniyor; indekslenemiyor. <code>data/scrape-report.json</code> içinde <code>failed</code> altında listelenir.</li><li><strong>Numarasız kararlar.</strong> Eski format bazı karar sayfalarında karar no sayfanın hiçbir yerinde geçmiyor (11 kayıt). <code>karar_no</code> bu kayıtlarda <code>NULL</code>, UI'da <code>no'suz</code> olarak gösterilir. Karar tarihi de yoksa <code>year</code> de <code>NULL</code> olur ve kayıt yıl filtresine girmez — yayınlanma tarihini karar tarihi yerine kullanmıyoruz, çünkü site 2024 tarihli bir kararı 2026'da yayınlayabiliyor.</li><li><strong>Birleşik kararlar.</strong> Bazı sayfalar tek metinde birden fazla karar taşıyor (<code>2021/511-512-513</code>, <code>2019/81 ve 2019/165</code>). Bu değerler olduğu gibi saklanır.</li><li><strong>TLS araya giren ortamlar.</strong> Makinede kurumsal proxy / antivirüs HTTPS taraması varsa (<code>NODE_EXTRA_CA_CERTS</code> ayarlıysa) <code>npm run dev</code> komutunu <strong>kendi terminalinden</strong> çalıştır. Next dev worker'ı bu değişkenleri yalnızca ortamdan miras alır; sanitize edilmiş bir ortamdan başlatılırsa HF çağrısı <code>UNABLE_TO_VERIFY_LEAF_SIGNATURE</code> ile patlar.</li></ul>
+<hr>
+<h2>Notlar</h2>
+<ul><li>Scrape kibar davranır: istekler arası <code>SCRAPE_DELAY_MS</code> (400 ms) bekleme, hatalarda exponential backoff.</li><li><code>data/scrape-report.json</code> her koşuda üretilir: kaç karar indi, hangi meta alanları görüldü, hangi URL'ler parse edilemedi.</li><li>Sayfa sayısı sabit değil — scraper pagination'daki en büyük <code>?page=N</code> değerini her koşuda yeniden okur (bugün 36).</li><li>Bu bir resmî yayın değildir; bağlayıcı metin için <code>kvkk.gov.tr</code> esas alınmalı.</li></ul>
+</body>
+</html>
