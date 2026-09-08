@@ -199,6 +199,9 @@ da sessizce yanlış konfigürasyon üretir.
 
 Liste sayfaları gezilir, ardından her detay sayfası indirilip parse edilir.
 
+- **Veritabanına dokunmaz:** bu adımın tek çıktısı `data/decisions.json` —
+  diskte bir JSON dosyası. Kararların DB'ye yazılması burada değil, bir sonraki
+  adımda (`npm run embed`) olur.
 - **Kibar davranır:** istekler arası 400 ms, hatalarda exponential backoff.
 - **Kaldığı yerden devam eder:** `data/decisions.json`'daki id'ler tekrar
   indirilmez, her 25 kayıtta diske yazılır.
@@ -226,15 +229,46 @@ tuzakları (`md.`, `No.`, `12.`) elle geçilir.
 
 **Sonuç:** 3.757 pasaj, ortalama 12,1 pasaj/karar.
 
-### 5. Embedding (`npm run embed`)
+### 5. Veritabanına yazma + embedding (`npm run embed`)
 
-Her pasaj HF Inference API ile 1024 boyutlu vektöre çevrilir.
+**Kafa karıştıran nokta burada netleşiyor.** Bir önceki adım (`scrape`)
+veritabanına hiç dokunmadı; elimizde yalnızca `data/decisions.json` var. Kararların
+ve chunk'ların DB'ye yazılmasının **tamamı** bu tek script'te
+(`scripts/03-embed.ts`) ve sırayla üç alt-adımda olur:
 
-- **Bağlam başlığı:** kararın Konu Özeti her chunk'a `head` kolonunda
-  denormalize edilir ve embedding girdisine eklenir. Karar gövdesi "veri
-  sorumlusu", "ilgili kişi" gibi genel ifadelerle yazılmış; hangi sektör/olay
-  olduğu çoğu zaman yalnızca başlıkta geçiyor. Başlık olmadan "hastane
-  kayıtları" gibi bir sorgu doğru kararı bulamıyor.
+1. **Kararlar → `kvkk.decisions`.** Her karar *ham ve bütün* haliyle yazılır:
+   tam gövde (`body`), başlık, karar no/tarihi, meta ve regex ile çıkarılan
+   hüküm/yaptırım. **Bu tabloda vektör yoktur** — burası gösterim ve alıntı
+   kaydıdır, arama birimi değil.
+2. **Chunk'lar → `kvkk.chunks`.** `chunkText(body)` her kararı pasajlara böler ve
+   pasajlar bu tabloya yazılır — **ama `embedding` kolonu bu noktada boş
+   (`NULL`).** Yani chunk önce yalnızca *metin* olarak kaydedilir.
+3. **Embedding.** Ayrı bir geçişte yalnızca `embedding IS NULL` olan pasajlar
+   HF'e gönderilir; dönen 1024 boyutlu vektör `UPDATE` ile aynı satıra yazılır.
+
+Yani chunk'lar "tek hamlede vektörlenmiş halde" değil, **önce metin, sonra vektör**
+olarak iki geçişte yazılır. Bunu bilerek ayırdık: chunk metnini yazmak ucuz (yerel
+DB işlemi), vektör üretmek pahalı (uzak API + rate limit). Ayrı oldukları için koşu
+yarıda kalsa bile `npm run embed`'i tekrar çalıştırmak yalnızca eksik kalan
+vektörleri tamamlar, baştan başlamaz.
+
+**`head` + `text` — embedding'e tam olarak ne gönderiyoruz?** Her chunk satırı iki
+ayrı metin alanı taşır:
+
+- **`text`** = pasajın kendisi; kararın gövdesinden kesilen ~1200 karakterlik
+  parça. Kullanıcının UI'da okuduğu, vurgulanan snippet **budur**.
+- **`head`** = kararın **Konu Özeti** (yoksa başlığı), her chunk'a kopyalanan
+  (denormalize edilen) bağlam başlığı. Kararın "neyle ilgili" olduğunu söyler.
+
+HF'e giden metin ikisinin birleşimidir: `head + "\n\n" + text`. Neden ikisi
+birden: karar gövdesi "veri sorumlusu", "ilgili kişi" gibi jenerik hukuki
+ifadelerle yazılmış; olayın hangi sektörde geçtiği (hastane, banka, kargo…) çoğu
+zaman **yalnızca Konu Özeti'nde** geçiyor. `head` olmadan "hastane kayıtları"
+sorgusu, gövdesinde "hastane" kelimesi hiç geçmeyen doğru kararı bulamaz. Aynı
+`head` full-text `tsv`'ye de girer (böylece terim araması da başlıktan yakalar).
+Ama **kullanıcıya gösterilen pasaj yalnızca `text`** — başlığı `text`'in içine
+gömseydik her snippet aynı cümleyle başlardı.
+
 - **E5 prefix'leri zorunlu:** doküman `passage: `, sorgu `query: `. Bu modeller
   asimetrik eğitildi; prefix'i atlamak recall'u belirgin düşürür.
 - **Kaldığı yerden devam eder:** yalnızca `embedding IS NULL` olan pasajlar
